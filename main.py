@@ -1,4 +1,4 @@
-# main.py
+# main.py (终极调试版 - 打印所有信息)
 
 # ==============================================================================
 # 导入必要的库
@@ -15,14 +15,12 @@ from email.header import Header
 import openai
 import json
 import markdown2
+import traceback # 导入traceback库
 
 # ==============================================================================
 # 全局常量与配置
 # ==============================================================================
 
-# SYSTEM_PROMPT: 定义了与大语言模型交互的核心指令。
-# 使用Markdown格式是因为它对LLM更友好，且在Prompt中易于阅读和维护。
-# {{emails}} 是一个占位符，将在运行时被真实的邮件数据替换。
 SYSTEM_PROMPT = """
 # 角色
 你是一名专业的邮件分析助手，专注于从结构化邮件数据中提取关键信息，生成**Markdown格式**的邮件摘要报告。
@@ -83,7 +81,8 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
 SENDER_AUTH_CODE = os.environ.get("SENDER_AUTH_CODE")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 SMTP_SERVER = os.environ.get("SMTP_SERVER")
-SMTP_PORT = int(os.environ.get("SMTP_PORT", 587)) # 默认使用587端口，兼容性最好
+SMTP_PORT_STR = os.environ.get("SMTP_PORT", "587")
+SMTP_PORT = int(SMTP_PORT_STR)
 
 # ==============================================================================
 # 核心功能函数
@@ -92,16 +91,7 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", 587)) # 默认使用587端口，兼�
 def get_emails_from_target_date(target_date):
     """
     通过IMAP连接到邮箱，获取指定日期的邮件。
-
-    为了解决特定IMAP服务器对日期查询不准的问题，本函数采用“客户端过滤”策略：
-    1. 向服务器请求一个比目标日期稍大的范围（例如，从昨天开始）。
-    2. 在本地代码中，精确解析每封邮件的Date头，只保留日期完全匹配的邮件。
-
-    Args:
-        target_date (datetime.datetime): 目标日期。
-
-    Returns:
-        list: 一个包含邮件信息的字典列表，每个字典代表一封邮件。
+    采用“客户端过滤”策略以解决服务器日期查询不准的问题。
     """
     mail_list = []
     try:
@@ -165,12 +155,6 @@ def get_emails_from_target_date(target_date):
 def summarize_with_llm(email_list):
     """
     调用DeepSeek API对邮件列表进行总结。
-
-    Args:
-        email_list (list): 从get_emails_from_target_date获取的邮件列表。
-
-    Returns:
-        str: 由大模型生成的Markdown格式的总结报告。
     """
     if not email_list:
         return "### 每日邮件汇总\n**总览：共 0 封邮件**\n\n--- \n\n今日没有收到新邮件。"
@@ -196,61 +180,127 @@ def summarize_with_llm(email_list):
 
 def send_email_notification(summary_md):
     """
-    将Markdown格式的总结报告转换为HTML，并通过SMTP (STARTTLS) 发送邮件。
-    使用最简化的邮件头以确保最高的兼容性。
+    【调试版】将Markdown格式的总结报告转换为HTML，并通过SMTP (STARTTLS) 发送邮件。
+    包含大量的调试打印信息。
     """
-    if not SENDER_EMAIL or not SENDER_AUTH_CODE or not RECEIVER_EMAIL:
-        print("发送邮件所需的环境变量不完整，跳过发送。")
+    print("\n--- 进入邮件发送函数 send_email_notification ---")
+    
+    # 1. 打印所有相关的环境变量，确认它们被正确加载
+    print("--- 检查环境变量 ---")
+    print(f"SENDER_EMAIL: {SENDER_EMAIL}")
+    print(f"SENDER_AUTH_CODE: {'已设置' if SENDER_AUTH_CODE else '未设置'}")
+    print(f"RECEIVER_EMAIL: {RECEIVER_EMAIL}")
+    print(f"SMTP_SERVER: {SMTP_SERVER}")
+    print(f"SMTP_PORT (读取的字符串): '{SMTP_PORT_STR}'")
+    print(f"SMTP_PORT (转换后整数): {SMTP_PORT}")
+    print("---------------------\n")
+
+    if not all([SENDER_EMAIL, SENDER_AUTH_CODE, RECEIVER_EMAIL, SMTP_SERVER]):
+        print("发送邮件所需的环境变量不完整，函数提前退出。")
         return
 
-    # 将Markdown转换为HTML
+    # 准备邮件内容
     html_content = markdown2.markdown(summary_md, extras=["tables", "fenced-code-blocks"])
-    
-    # --- 关键修改：使用最简单的邮件对象构造方式 ---
     message = MIMEText(html_content, 'html', 'utf-8')
-    
-    # 1. Subject: 使用Header编码，但确保格式简单
     subject_str = f"每日邮件总结 - {datetime.now().strftime('%Y-%m-%d')}"
     message['Subject'] = Header(subject_str, 'utf-8')
-    
-    # 2. From: 直接使用邮箱地址，这是已验证的成功方式
     message['From'] = SENDER_EMAIL
-    
-    # 3. To: 直接使用邮箱地址，放弃复杂的显示名称
     message['To'] = RECEIVER_EMAIL
-    # --- 修改结束 ---
 
     try:
-        # 使用STARTTLS，这是更通用和推荐的SMTP加密方式
-        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
-        # 开启调试模式，以便在GitHub Actions中看到详细日志
-        server.set_debuglevel(1)
+        print(f"--- 准备连接到 SMTP 服务器 ---")
+        print(f"目标: {SMTP_SERVER}:{SMTP_PORT}")
         
-        server.ehlo()
-        server.starttls()
-        server.ehlo()
-        server.login(SENDER_EMAIL, SENDER_AUTH_CODE)
-        server.sendmail(SENDER_EMAIL, [RECEIVER_EMAIL], message.as_string())
+        # 建立连接
+        server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
+        print("✅ 初始连接建立成功 (smtplib.SMTP)")
+        
+        # 开启最详细的调试模式
+        server.set_debuglevel(2)
+        print("开启详细调试模式 (debuglevel=2)")
+
+        # 关键步骤，我们将每一步都包裹在 try...except 中
+        try:
+            print("\n[步骤1: 发送 EHLO]")
+            server.ehlo()
+        except Exception as e:
+            print(f"❌ 在初次 EHLO 步骤失败: {e}")
+            traceback.print_exc()
+            server.quit()
+            return
+        
+        try:
+            print("\n[步骤2: 启动 STARTTLS]")
+            server.starttls()
+            print("✅ STARTTLS 命令发送成功")
+        except Exception as e:
+            print(f"❌ 在 STARTTLS 步骤失败: {e}")
+            traceback.print_exc()
+            server.quit()
+            return
+        
+        try:
+            print("\n[步骤3: 加密后再次发送 EHLO]")
+            server.ehlo()
+        except Exception as e:
+            print(f"❌ 在加密后 EHLO 步骤失败: {e}")
+            traceback.print_exc()
+            server.quit()
+            return
+
+        try:
+            print("\n[步骤4: 登录]")
+            server.login(SENDER_EMAIL, SENDER_AUTH_CODE)
+            print("✅ 登录成功")
+        except Exception as e:
+            print(f"❌ 在 登录 步骤失败: {e}")
+            traceback.print_exc()
+            server.quit()
+            return
+
+        try:
+            print("\n[步骤5: 发送邮件]")
+            server.sendmail(SENDER_EMAIL, [RECEIVER_EMAIL], message.as_string())
+            print("✅ 邮件发送成功")
+        except Exception as e:
+            print(f"❌ 在 发送邮件 步骤失败: {e}")
+            traceback.print_exc()
+            server.quit()
+            return
+            
         server.quit()
-        print(f"成功发送邮件总结到 {RECEIVER_EMAIL}！")
+        print(f"--- 邮件发送流程正常结束 ---")
+
     except Exception as e:
-        print(f"发送邮件失败: {e}")
-        import traceback
-        traceback.print_exc() # 打印完整错误堆栈
+        # 这个总的except块现在能捕获连接建立时的错误
+        print(f"❌ 在建立连接或执行命令的某个环节发生顶层错误: {e}")
+        traceback.print_exc()
 
 # ==============================================================================
 # 主执行入口
 # ==============================================================================
 if __name__ == "__main__":
-    # 在执行核心逻辑前，进行一次必要的环境变量检查
-    required_vars = ["IMAP_EMAIL", "IMAP_AUTH_CODE", "TARGET_FOLDER", "DEEPSEEK_API_KEY", 
-                     "SENDER_EMAIL", "SENDER_AUTH_CODE", "RECEIVER_EMAIL", "SMTP_SERVER", "SMTP_PORT"]
-    if not all(os.environ.get(var) for var in required_vars):
-        print("错误：一个或多个必要的环境变量未设置。请检查GitHub Secrets配置。")
-        exit(1)
-
+    print("--- 启动主执行流程 ---")
     print(f"任务启动于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
     
+    # 打印所有环境变量以供调试
+    print("\n--- 打印所有加载的环境变量 ---")
+    for key, value in os.environ.items():
+        # 为了安全，不直接打印包含 'KEY' 或 'CODE' 的敏感信息
+        if "KEY" in key.upper() or "CODE" in key.upper():
+            print(f"{key}: {'*' * len(value) if value else '未设置'}")
+        else:
+            print(f"{key}: {value}")
+    print("---------------------------------\n")
+
+    # 检查必要的环境变量
+    required_vars = ["IMAP_EMAIL", "IMAP_AUTH_CODE", "TARGET_FOLDER", "DEEPSEEK_API_KEY", 
+                     "SENDER_EMAIL", "SENDER_AUTH_CODE", "RECEIVER_EMAIL", "SMTP_SERVER", "SMTP_PORT"]
+    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    if missing_vars:
+        print(f"错误：以下必要的环境变量未设置: {', '.join(missing_vars)}。请检查GitHub Secrets配置。")
+        exit(1)
+
     today = datetime.now()
     emails = get_emails_from_target_date(today)
     summary_report = summarize_with_llm(emails)
