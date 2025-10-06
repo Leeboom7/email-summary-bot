@@ -1,0 +1,73 @@
+# .github/workflows/test-smtp.yml
+
+name: Test SMTP Connection
+
+on:
+  workflow_dispatch: # 只允许手动触发
+
+jobs:
+  run-smtp-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Python
+        uses: actions/setup-python@v4
+        with:
+          python-version: '3.10'
+
+      - name: Run SMTP Test Script
+        env:
+          # 我们只需要发送邮件的凭据
+          SENDER_EMAIL: ${{ secrets.SENDER_EMAIL }}
+          SENDER_AUTH_CODE: ${{ secrets.SENDER_AUTH_CODE }}
+          RECEIVER_EMAIL: ${{ secrets.RECEIVER_EMAIL }}
+          SMTP_SERVER: ${{ secrets.SMTP_SERVER }}
+          SMTP_PORT: ${{ secrets.SMTP_PORT }}
+        run: |
+          python - <<EOF
+          import os
+          import smtplib
+          from email.mime.text import MIMEText
+          from datetime import datetime
+
+          # 从环境变量获取配置
+          SENDER_EMAIL = os.environ.get('SENDER_EMAIL')
+          SENDER_AUTH_CODE = os.environ.get('SENDER_AUTH_CODE')
+          RECEIVER_EMAIL = os.environ.get('RECEIVER_EMAIL')
+          SMTP_SERVER = os.environ.get('SMTP_SERVER')
+          SMTP_PORT = int(os.environ.get('SMTP_PORT', 587))
+
+          print(f'--- 开始SMTP连接测试 ---')
+          print(f'服务器: {SMTP_SERVER}, 端口: {SMTP_PORT}')
+          print(f'发件人: {SENDER_EMAIL}')
+
+          try:
+              # 准备一封简单的测试邮件
+              message = MIMEText('这是一封来自GitHub Actions的SMTP连接测试邮件。', 'plain', 'utf-8')
+              message['From'] = SENDER_EMAIL
+              message['To'] = RECEIVER_EMAIL
+              message['Subject'] = f'SMTP Test from GitHub Actions - {datetime.now().strftime("%H:%M:%S")}'
+
+              # 使用STARTTLS进行连接，并开启调试模式
+              server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
+              server.set_debuglevel(1)
+              
+              print('\\n[步骤1: 启动STARTTLS]')
+              server.starttls()
+              
+              print('\\n[步骤2: 登录]')
+              server.login(SENDER_EMAIL, SENDER_AUTH_CODE)
+              
+              print('\\n[步骤3: 发送邮件]')
+              server.sendmail(SENDER_EMAIL, [RECEIVER_EMAIL], message.as_string())
+              
+              print('\\n[步骤4: 关闭连接]')
+              server.quit()
+              
+              print('\\n✅ SMTP连接测试成功！')
+
+          except Exception as e:
+              print(f'❌ SMTP连接测试失败: {e}')
+              import traceback
+              traceback.print_exc()
+              exit(1) # 以失败状态退出，让GitHub Actions知道任务失败了
+          EOF
