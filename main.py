@@ -197,9 +197,7 @@ def summarize_with_llm(email_list):
 def send_email_notification(summary_md):
     """
     将Markdown格式的总结报告转换为HTML，并通过SMTP (STARTTLS) 发送邮件。
-
-    Args:
-        summary_md (str): Markdown格式的总结报告。
+    使用最简化的邮件头以确保最高的兼容性。
     """
     if not SENDER_EMAIL or not SENDER_AUTH_CODE or not RECEIVER_EMAIL:
         print("发送邮件所需的环境变量不完整，跳过发送。")
@@ -208,16 +206,26 @@ def send_email_notification(summary_md):
     # 将Markdown转换为HTML
     html_content = markdown2.markdown(summary_md, extras=["tables", "fenced-code-blocks"])
     
+    # --- 关键修改：使用最简单的邮件对象构造方式 ---
     message = MIMEText(html_content, 'html', 'utf-8')
-    # 简化From头，只使用邮箱地址，以确保与所有邮件服务器的最佳兼容性
+    
+    # 1. Subject: 使用Header编码，但确保格式简单
+    subject_str = f"每日邮件总结 - {datetime.now().strftime('%Y-%m-%d')}"
+    message['Subject'] = Header(subject_str, 'utf-8')
+    
+    # 2. From: 直接使用邮箱地址，这是已验证的成功方式
     message['From'] = SENDER_EMAIL
-    # 对To和Subject使用Header编码，以支持非ASCII字符
-    message['To'] = Header(f"Dear User <{RECEIVER_EMAIL}>", 'utf-8')
-    message['Subject'] = Header(f"每日邮件总结 - {datetime.now().strftime('%Y-%m-%d')}", 'utf-8')
+    
+    # 3. To: 直接使用邮箱地址，放弃复杂的显示名称
+    message['To'] = RECEIVER_EMAIL
+    # --- 修改结束 ---
 
     try:
         # 使用STARTTLS，这是更通用和推荐的SMTP加密方式
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
+        # 开启调试模式，以便在GitHub Actions中看到详细日志
+        server.set_debuglevel(1)
+        
         server.ehlo()
         server.starttls()
         server.ehlo()
@@ -227,6 +235,8 @@ def send_email_notification(summary_md):
         print(f"成功发送邮件总结到 {RECEIVER_EMAIL}！")
     except Exception as e:
         print(f"发送邮件失败: {e}")
+        import traceback
+        traceback.print_exc() # 打印完整错误堆栈
 
 # ==============================================================================
 # 主执行入口
