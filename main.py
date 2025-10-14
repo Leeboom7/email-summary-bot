@@ -8,19 +8,19 @@ import imaplib
 import email
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone # 导入 timezone 以处理时区
 import smtplib
 from email.mime.text import MIMEText
 from email.header import Header
 import openai
 import json
 import markdown2
-import traceback
 
 # ==============================================================================
 # 全局常量与配置
 # ==============================================================================
 
+# SYSTEM_PROMPT: 定义了与大语言模型交互的核心指令。
 SYSTEM_PROMPT = """
 # 角色
 你是一名专业的邮件分析助手，专注于从结构化邮件数据中提取关键信息，生成**Markdown格式**的邮件摘要报告。
@@ -81,8 +81,7 @@ SENDER_EMAIL = os.environ.get("SENDER_EMAIL")
 SENDER_AUTH_CODE = os.environ.get("SENDER_AUTH_CODE")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 SMTP_SERVER = os.environ.get("SMTP_SERVER")
-SMTP_PORT_STR = os.environ.get("SMTP_PORT", "587")
-SMTP_PORT = int(SMTP_PORT_STR)
+SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
 # ==============================================================================
 # 核心功能函数
@@ -91,15 +90,18 @@ SMTP_PORT = int(SMTP_PORT_STR)
 def get_emails_from_target_date(target_date):
     """
     通过IMAP连接到邮箱，获取指定日期的邮件。
-    采用“客户端过滤”策略以解决服务器日期查询不准的问题。
+    采用“客户端过滤”策略，并在过滤前将所有邮件时间统一到北京时区，以确保准确性。
     """
     mail_list = []
+    beijing_tz = timezone(timedelta(hours=8)) # 定义北京时区
+
     try:
         conn = imaplib.IMAP4_SSL(IMAP_SERVER)
         conn.login(IMAP_EMAIL, IMAP_AUTH_CODE)
         conn.select(f'"{TARGET_FOLDER}"')
         
-        fetch_since_dt = target_date - timedelta(days=1)
+        # 获取一个足够宽的范围（最近2天），确保不会因时区问题漏掉邮件
+        fetch_since_dt = target_date - timedelta(days=2)
         fetch_since_str = fetch_since_dt.strftime("%d-%b-%Y")
         search_query = f'(SINCE "{fetch_since_str}")'
         
@@ -119,11 +121,20 @@ def get_emails_from_target_date(target_date):
                 date_header = msg.get("Date")
                 if not date_header: continue
                 
-                email_dt = parsedate_to_datetime(date_header)
+                # --- 关键的时区处理逻辑 ---
+                email_dt_original = parsedate_to_datetime(date_header)
                 
-                if email_dt.date() != target_date.date():
+                # 将邮件时间统一转换为北京时区
+                if email_dt_original.tzinfo is None:
+                    email_dt_in_beijing = email_dt_original.replace(tzinfo=timezone.utc).astimezone(beijing_tz)
+                else:
+                    email_dt_in_beijing = email_dt_original.astimezone(beijing_tz)
+
+                # 在同一个时区下进行日期比较
+                if email_dt_in_beijing.date() != target_date.date():
                     continue
 
+                # --- 日期匹配成功，开始解析邮件内容 ---
                 subject, encoding = decode_header(msg["Subject"])[0]
                 if isinstance(subject, bytes): subject = subject.decode(encoding if encoding else "utf-8")
 
@@ -180,135 +191,52 @@ def summarize_with_llm(email_list):
 
 def send_email_notification(summary_md, date_for_subject):
     """
-    【调试版】将Markdown格式的总结报告转换为HTML，并通过SMTP (STARTTLS) 发送邮件。
-    包含大量的调试打印信息。
+    将Markdown报告转换为HTML并通过SMTP (STARTTLS) 发送。
     """
-    print("\n--- 进入邮件发送函数 send_email_notification ---")
-    
-    # 1. 打印所有相关的环境变量，确认它们被正确加载
-    print("--- 检查环境变量 ---")
-    print(f"SENDER_EMAIL: {SENDER_EMAIL}")
-    print(f"SENDER_AUTH_CODE: {'已设置' if SENDER_AUTH_CODE else '未设置'}")
-    print(f"RECEIVER_EMAIL: {RECEIVER_EMAIL}")
-    print(f"SMTP_SERVER: {SMTP_SERVER}")
-    print(f"SMTP_PORT (读取的字符串): '{SMTP_PORT_STR}'")
-    print(f"SMTP_PORT (转换后整数): {SMTP_PORT}")
-    print("---------------------\n")
-
-    if not all([SENDER_EMAIL, SENDER_AUTH_CODE, RECEIVER_EMAIL, SMTP_SERVER]):
-        print("发送邮件所需的环境变量不完整，函数提前退出。")
+    if not SENDER_EMAIL or not SENDER_AUTH_CODE or not RECEIVER_EMAIL:
+        print("发送邮件所需的环境变量不完整，跳过发送。")
         return
 
-    # 准备邮件内容
     html_content = markdown2.markdown(summary_md, extras=["tables", "fenced-code-blocks"])
     message = MIMEText(html_content, 'html', 'utf-8')
+    
     subject_str = f"每日邮件总结 - {date_for_subject.strftime('%Y-%m-%d')}"
     message['Subject'] = Header(subject_str, 'utf-8')
     message['From'] = SENDER_EMAIL
     message['To'] = RECEIVER_EMAIL
 
     try:
-        print(f"--- 准备连接到 SMTP 服务器 ---")
-        print(f"目标: {SMTP_SERVER}:{SMTP_PORT}")
-        
-        # 建立连接
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
-        print("✅ 初始连接建立成功 (smtplib.SMTP)")
-        
-        # 调试
-        server.set_debuglevel(2)
-        print("开启详细调试")
-
-        try:
-            print("\n[步骤1: 发送 EHLO]")
-            server.ehlo()
-        except Exception as e:
-            print(f"❌ 在初次 EHLO 步骤失败: {e}")
-            traceback.print_exc()
-            server.quit()
-            return
-        
-        try:
-            print("\n[步骤2: 启动 STARTTLS]")
-            server.starttls()
-            print("✅ STARTTLS 命令发送成功")
-        except Exception as e:
-            print(f"❌ 在 STARTTLS 步骤失败: {e}")
-            traceback.print_exc()
-            server.quit()
-            return
-        
-        try:
-            print("\n[步骤3: 加密后再次发送 EHLO]")
-            server.ehlo()
-        except Exception as e:
-            print(f"❌ 在加密后 EHLO 步骤失败: {e}")
-            traceback.print_exc()
-            server.quit()
-            return
-
-        try:
-            print("\n[步骤4: 登录]")
-            server.login(SENDER_EMAIL, SENDER_AUTH_CODE)
-            print("✅ 登录成功")
-        except Exception as e:
-            print(f"❌ 在 登录 步骤失败: {e}")
-            traceback.print_exc()
-            server.quit()
-            return
-
-        try:
-            print("\n[步骤5: 发送邮件]")
-            server.sendmail(SENDER_EMAIL, [RECEIVER_EMAIL], message.as_string())
-            print("✅ 邮件发送成功")
-        except Exception as e:
-            print(f"❌ 在 发送邮件 步骤失败: {e}")
-            traceback.print_exc()
-            server.quit()
-            return
-            
+        server.starttls()
+        server.login(SENDER_EMAIL, SENDER_AUTH_CODE)
+        server.sendmail(SENDER_EMAIL, [RECEIVER_EMAIL], message.as_string())
         server.quit()
-        print(f"--- 邮件发送流程正常结束 ---")
-
+        print(f"成功发送邮件总结到 {RECEIVER_EMAIL}！")
     except Exception as e:
-        # 这个总的except块现在能捕获连接建立时的错误
-        print(f"❌ 在建立连接或执行命令的某个环节发生顶层错误: {e}")
-        traceback.print_exc()
+        print(f"发送邮件失败: {e}")
 
 # ==============================================================================
 # 主执行入口
 # ==============================================================================
 if __name__ == "__main__":
-    print("--- 启动主执行流程 ---")
-    print(f"任务启动于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    
-    # 打印所有环境变量以供调试
-    print("\n--- 打印所有加载的环境变量 ---")
-    for key, value in os.environ.items():
-        # 为了安全，不直接打印包含 'KEY' 或 'CODE' 的敏感信息
-        if "KEY" in key.upper() or "CODE" in key.upper():
-            print(f"{key}: {'*' * len(value) if value else '未设置'}")
-        else:
-            print(f"{key}: {value}")
-    print("---------------------------------\n")
-
-    # 检查必要的环境变量
     required_vars = ["IMAP_EMAIL", "IMAP_AUTH_CODE", "TARGET_FOLDER", "DEEPSEEK_API_KEY", 
                      "SENDER_EMAIL", "SENDER_AUTH_CODE", "RECEIVER_EMAIL", "SMTP_SERVER", "SMTP_PORT"]
-    missing_vars = [var for var in required_vars if not os.environ.get(var)]
-    if missing_vars:
-        print(f"错误：以下必要的环境变量未设置: {', '.join(missing_vars)}。请检查GitHub Secrets配置。")
+    if not all(os.environ.get(var) for var in required_vars):
+        print("错误：一个或多个必要的环境变量未设置。")
         exit(1)
 
-    target_day = datetime.now() - timedelta(days=1)
-    print(f"将要总结的日期是: {target_day.strftime('%Y-%m-%d')}")
+    print(f"任务启动于 (UTC): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
     
-    # 将昨天的日期传递给邮件获取函数
+    # --- 关键的时区处理逻辑 ---
+    beijing_timezone = timezone(timedelta(hours=8))
+    beijing_now = datetime.now(beijing_timezone)
+    
+    # 采用“总结昨天”的最佳实践
+    target_day = beijing_now - timedelta(days=1)
+    print(f"将要总结的日期是 (北京时间): {target_day.strftime('%Y-%m-%d')}")
+    
     emails = get_emails_from_target_date(target_day)
-    
     summary_report = summarize_with_llm(emails)
-    
-    # 将昨天的日期传递给邮件发送函数，以确保邮件主题正确
     send_email_notification(summary_report, target_day)
     
-    print(f"任务执行完毕于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+    print(f"任务执行完毕于 (UTC): {datetime.utcnow().strftime('%Y-%m-%d %H:%M:%S')}")
