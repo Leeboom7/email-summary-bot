@@ -1,4 +1,4 @@
-# main.py (终极调试版 - 打印所有信息)
+# main.py
 
 # ==============================================================================
 # 导入必要的库
@@ -15,7 +15,7 @@ from email.header import Header
 import openai
 import json
 import markdown2
-import traceback # 导入traceback库
+import traceback
 
 # ==============================================================================
 # 全局常量与配置
@@ -178,7 +178,7 @@ def summarize_with_llm(email_list):
         print(f"调用DeepSeek API失败: {e}")
         return f"### 生成邮件摘要失败\n\n**错误详情**:\n`{e}`"
 
-def send_email_notification(summary_md):
+def send_email_notification(summary_md, date_for_subject):
     """
     【调试版】将Markdown格式的总结报告转换为HTML，并通过SMTP (STARTTLS) 发送邮件。
     包含大量的调试打印信息。
@@ -202,7 +202,7 @@ def send_email_notification(summary_md):
     # 准备邮件内容
     html_content = markdown2.markdown(summary_md, extras=["tables", "fenced-code-blocks"])
     message = MIMEText(html_content, 'html', 'utf-8')
-    subject_str = f"每日邮件总结 - {datetime.now().strftime('%Y-%m-%d')}"
+    subject_str = f"每日邮件总结 - {date_for_subject.strftime('%Y-%m-%d')}"
     message['Subject'] = Header(subject_str, 'utf-8')
     message['From'] = SENDER_EMAIL
     message['To'] = RECEIVER_EMAIL
@@ -215,11 +215,10 @@ def send_email_notification(summary_md):
         server = smtplib.SMTP(SMTP_SERVER, SMTP_PORT, timeout=30)
         print("✅ 初始连接建立成功 (smtplib.SMTP)")
         
-        # 开启最详细的调试模式
+        # 调试
         server.set_debuglevel(2)
-        print("开启详细调试模式 (debuglevel=2)")
+        print("开启详细调试")
 
-        # 关键步骤，我们将每一步都包裹在 try...except 中
         try:
             print("\n[步骤1: 发送 EHLO]")
             server.ehlo()
@@ -301,9 +300,15 @@ if __name__ == "__main__":
         print(f"错误：以下必要的环境变量未设置: {', '.join(missing_vars)}。请检查GitHub Secrets配置。")
         exit(1)
 
-    today = datetime.now()
-    emails = get_emails_from_target_date(today)
+    target_day = datetime.now() - timedelta(days=1)
+    print(f"将要总结的日期是: {target_day.strftime('%Y-%m-%d')}")
+    
+    # 将昨天的日期传递给邮件获取函数
+    emails = get_emails_from_target_date(target_day)
+    
     summary_report = summarize_with_llm(emails)
-    send_email_notification(summary_report)
+    
+    # 将昨天的日期传递给邮件发送函数，以确保邮件主题正确
+    send_email_notification(summary_report, target_day)
     
     print(f"任务执行完毕于 {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")

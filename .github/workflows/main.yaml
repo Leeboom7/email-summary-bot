@@ -3,7 +3,7 @@ name: Daily Email Summary
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 10 * * *'
+    - cron: '15 16 * * *'
 
 jobs:
   run-summary:
