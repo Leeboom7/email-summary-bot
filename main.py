@@ -89,18 +89,22 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 
 def get_emails_from_target_date(target_date):
     """
-    通过IMAP连接到邮箱，获取指定日期的邮件。
-    采用“客户端过滤”策略，并在过滤前将所有邮件时间统一到北京时区，以确保准确性。
+    【终极诊断版】通过IMAP连接到邮箱，获取邮件，并在过滤时打印详细的诊断信息。
     """
     mail_list = []
-    beijing_tz = timezone(timedelta(hours=8)) # 定义北京时区
+    beijing_tz = timezone(timedelta(hours=8))
+
+    # --- 增加诊断打印：打印传入的目标日期 ---
+    print(f"\n--- 进入 get_emails_from_target_date 函数 ---")
+    print(f"函数接收到的目标日期 (target_date): {target_date.isoformat()}")
+    print(f"将要匹配的日期 (target_date.date()): {target_date.date()}")
+    print("--------------------------------------------------\n")
 
     try:
         conn = imaplib.IMAP4_SSL(IMAP_SERVER)
         conn.login(IMAP_EMAIL, IMAP_AUTH_CODE)
         conn.select(f'"{TARGET_FOLDER}"')
         
-        # 获取一个足够宽的范围（最近2天），确保不会因时区问题漏掉邮件
         fetch_since_dt = target_date - timedelta(days=2)
         fetch_since_str = fetch_since_dt.strftime("%d-%b-%Y")
         search_query = f'(SINCE "{fetch_since_str}")'
@@ -112,6 +116,7 @@ def get_emails_from_target_date(target_date):
             return []
             
         email_ids = messages[0].split()
+        print(f"IMAP服务器为查询 '{search_query}' 返回了 {len(email_ids)} 封邮件，开始逐一过滤...")
         
         for email_id in reversed(email_ids):
             _, msg_data = conn.fetch(email_id, "(RFC822)")
@@ -119,23 +124,40 @@ def get_emails_from_target_date(target_date):
 
             try:
                 date_header = msg.get("Date")
-                if not date_header: continue
+                subject_header = msg.get("Subject", "无主题")
                 
-                # --- 关键的时区处理逻辑 ---
+                print(f"\n--- 正在检查邮件 ID: {email_id.decode()} ---")
+                print(f"主题: {subject_header[:50]}...")
+                
+                if not date_header:
+                    print("  [结果] 跳过 (原因: 邮件没有Date头)")
+                    continue
+                
+                # --- 详细打印时区处理的每一步 ---
+                print(f"  1. 原始Date头: {date_header}")
                 email_dt_original = parsedate_to_datetime(date_header)
+                print(f"  2. 解析后的datetime对象 (原始): {email_dt_original.isoformat()}")
                 
-                # 将邮件时间统一转换为北京时区
                 if email_dt_original.tzinfo is None:
                     email_dt_in_beijing = email_dt_original.replace(tzinfo=timezone.utc).astimezone(beijing_tz)
+                    print(f"  3. 转换为北京时区 (假设原始为UTC): {email_dt_in_beijing.isoformat()}")
                 else:
                     email_dt_in_beijing = email_dt_original.astimezone(beijing_tz)
+                    print(f"  3. 转换为北京时区: {email_dt_in_beijing.isoformat()}")
 
-                # 在同一个时区下进行日期比较
-                if email_dt_in_beijing.date() != target_date.date():
+                email_date_to_compare = email_dt_in_beijing.date()
+                target_date_to_compare = target_date.date()
+                
+                print(f"  4. 最终比较: 邮件日期 [{email_date_to_compare}] == 目标日期 [{target_date_to_compare}] ?")
+
+                if email_date_to_compare != target_date_to_compare:
+                    print("  [结果] 跳过 (原因: 日期不匹配)")
                     continue
+                else:
+                    print("  [结果] 保留 (原因: 日期匹配)")
 
                 # --- 日期匹配成功，开始解析邮件内容 ---
-                subject, encoding = decode_header(msg["Subject"])[0]
+                subject, encoding = decode_header(subject_header)[0]
                 if isinstance(subject, bytes): subject = subject.decode(encoding if encoding else "utf-8")
 
                 from_, encoding = decode_header(msg.get("From"))[0]
@@ -153,11 +175,11 @@ def get_emails_from_target_date(target_date):
                 
                 mail_list.append({ "from_sender": from_, "subject": subject, "body_preview": body[:1500] })
             except Exception as e:
-                print(f"解析邮件 {email_id.decode()} 时出错: {e}")
+                print(f"解析或过滤邮件 {email_id.decode()} 时出错: {e}")
                 continue
                 
         conn.logout()
-        print(f"成功从'{TARGET_FOLDER}'文件夹获取并过滤出 {len(mail_list)} 封邮件。")
+        print(f"\n成功从'{TARGET_FOLDER}'文件夹获取并过滤出 {len(mail_list)} 封邮件。")
         return mail_list
     except Exception as e:
         print(f"获取邮件失败: {e}")
