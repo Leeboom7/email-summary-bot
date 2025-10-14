@@ -20,8 +20,6 @@ import markdown2
 # 全局常量与配置
 # ==============================================================================
 
-# SYSTEM_PROMPT: 这是我们唯一的、完整的Prompt。
-# 新增了占位符 {{start_index}} 和关于志愿者招募的标记规则。
 SYSTEM_PROMPT = """
 # 角色
 你是一名专业的邮件分析助手，任务是根据下方提供的邮件JSON数据，生成一段Markdown格式的摘要报告。
@@ -183,7 +181,7 @@ def summarize_single_batch(client, email_batch, start_index):
 
 def summarize_with_llm(email_list, batch_size=25):
     """
-    【总指挥函数】协调分批处理邮件列表的总结任务。
+    协调分批处理邮件列表的总结任务。
     """
     if not email_list:
         return "### 每日邮件汇总\n**总览：共 0 封邮件**\n\n--- \n\n今日没有收到新邮件。"
