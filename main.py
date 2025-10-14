@@ -91,6 +91,7 @@ def get_emails_from_target_date(target_date):
     """
     通过IMAP连接到邮箱，获取指定日期的邮件。
     采用“客户端过滤”策略，并在过滤前将所有邮件时间统一到北京时区，以确保准确性。
+    (新增) 对邮件头和正文的解码增加了容错处理。
     """
     mail_list = []
     beijing_tz = timezone(timedelta(hours=8)) # 定义北京时区
@@ -100,7 +101,6 @@ def get_emails_from_target_date(target_date):
         conn.login(IMAP_EMAIL, IMAP_AUTH_CODE)
         conn.select(f'"{TARGET_FOLDER}"')
         
-        # 获取一个足够宽的范围（最近2天），确保不会因时区问题漏掉邮件
         fetch_since_dt = target_date - timedelta(days=2)
         fetch_since_str = fetch_since_dt.strftime("%d-%b-%Y")
         search_query = f'(SINCE "{fetch_since_str}")'
@@ -121,35 +121,56 @@ def get_emails_from_target_date(target_date):
                 date_header = msg.get("Date")
                 if not date_header: continue
                 
-                # --- 关键的时区处理逻辑 ---
                 email_dt_original = parsedate_to_datetime(date_header)
                 
-                # 将邮件时间统一转换为北京时区
                 if email_dt_original.tzinfo is None:
                     email_dt_in_beijing = email_dt_original.replace(tzinfo=timezone.utc).astimezone(beijing_tz)
                 else:
                     email_dt_in_beijing = email_dt_original.astimezone(beijing_tz)
 
-                # 在同一个时区下进行日期比较
                 if email_dt_in_beijing.date() != target_date.date():
                     continue
 
-                # --- 日期匹配成功，开始解析邮件内容 ---
+                # --- 【修改点1：主题解码增加容错】 ---
                 subject, encoding = decode_header(msg["Subject"])[0]
-                if isinstance(subject, bytes): subject = subject.decode(encoding if encoding else "utf-8")
+                if isinstance(subject, bytes):
+                    subject = subject.decode(encoding if encoding else "utf-8", errors='ignore') # (修改)
 
+                # --- 【修改点2：发件人解码增加容错】 ---
                 from_, encoding = decode_header(msg.get("From"))[0]
-                if isinstance(from_, bytes): from_ = from_.decode(encoding if encoding else "utf-8")
+                if isinstance(from_, bytes):
+                    from_ = from_.decode(encoding if encoding else "utf-8", errors='ignore') # (修改)
 
+                # --- 【修改点3：正文解码增加更强的容错逻辑】 ---
                 body = ""
                 if msg.is_multipart():
                     for part in msg.walk():
                         if part.get_content_type() == "text/plain":
-                            try: body = part.get_payload(decode=True).decode(); break
+                            try:
+                                body_bytes = part.get_payload(decode=True) # (修改)
+                                # (修改) 尝试用多种编码解码，最后使用 'ignore' 作为兜底
+                                try:
+                                    body = body_bytes.decode('utf-8')
+                                except UnicodeDecodeError:
+                                    try:
+                                        body = body_bytes.decode('gbk')
+                                    except UnicodeDecodeError:
+                                        body = body_bytes.decode('utf-8', errors='ignore')
+                                break
                             except: continue
                 else:
-                    try: body = msg.get_payload(decode=True).decode()
-                    except: body = "无法解码正文。"
+                    try:
+                        body_bytes = msg.get_payload(decode=True) # (修改)
+                        # (修改) 同样尝试多种编码
+                        try:
+                            body = body_bytes.decode('utf-8')
+                        except UnicodeDecodeError:
+                            try:
+                                body = body_bytes.decode('gbk')
+                            except UnicodeDecodeError:
+                                body = body_bytes.decode('utf-8', errors='ignore')
+                    except:
+                        body = "无法解码正文。"
                 
                 mail_list.append({ "from_sender": from_, "subject": subject, "body_preview": body[:1500] })
             except Exception as e:
