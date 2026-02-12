@@ -17,6 +17,7 @@ from email.header import Header
 import openai
 import json
 import markdown2
+import time
 
 # ==============================================================================
 # 全局常量与配置
@@ -71,6 +72,9 @@ SENDER_AUTH_CODE = os.environ.get("SENDER_AUTH_CODE")
 RECEIVER_EMAIL = os.environ.get("RECEIVER_EMAIL")
 SMTP_SERVER = os.environ.get("SMTP_SERVER")
 SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
+LLM_MODEL = os.environ.get("LLM_MODEL", "deepseek-chat")
+LLM_TEMPERATURE = float(os.environ.get("LLM_TEMPERATURE", 0))
+LLM_MAX_TOKENS = int(os.environ.get("LLM_MAX_TOKENS", 4096))
 
 # ==============================================================================
 # 核心功能函数
@@ -213,7 +217,52 @@ def get_emails_from_target_date(target_date):
         print(f"获取邮件失败: {e}")
         return []
 
-def summarize_single_batch(client, email_batch, start_index):
+def _extract_status_code(exception):
+    """从异常对象中尽力提取HTTP状态码。"""
+    status_code = getattr(exception, "status_code", None)
+    if status_code is not None:
+        return status_code
+
+    response = getattr(exception, "response", None)
+    if response is not None:
+        return getattr(response, "status_code", None)
+
+    return None
+
+
+def _is_retryable_exception(exception):
+    """判断当前异常是否可重试（网络超时、429、5xx）。"""
+    status_code = _extract_status_code(exception)
+    if status_code == 429 or (status_code is not None and 500 <= status_code < 600):
+        return True
+
+    exception_text = str(exception).lower()
+    timeout_signals = ["timeout", "timed out", "readtimeout", "connecttimeout", "网络超时"]
+    return any(signal in exception_text for signal in timeout_signals)
+
+
+def _build_batch_error_block(start_index, batch_size, exception):
+    """构建结构化错误块，避免失败被静默吞掉。"""
+    batch_end = start_index + batch_size - 1
+    exception_type = type(exception).__name__
+    status_code = _extract_status_code(exception)
+    structured_error = {
+        "batch_range": f"{start_index}-{batch_end}",
+        "exception_type": exception_type,
+        "status_code": status_code,
+        "message": str(exception),
+    }
+    return (
+        "---\n\n"
+        f"#### 处理邮件 {start_index} 到 {batch_end} 时失败\n"
+        "```json\n"
+        f"{json.dumps(structured_error, ensure_ascii=False, indent=2)}\n"
+        "```\n\n"
+        "---"
+    )
+
+
+def summarize_single_batch(client, email_batch, start_index, max_retries=3, base_delay=2):
     """
     【辅助函数】使用统一的SYSTEM_PROMPT，处理单批次的邮件。
     """
@@ -222,18 +271,41 @@ def summarize_single_batch(client, email_batch, start_index):
     prompt_filled = SYSTEM_PROMPT.replace("{{emails}}", emails_json_str)
     prompt_filled = prompt_filled.replace("{{start_index}}", str(start_index))
     
-    try:
-        response = client.chat.completions.create(
-            model="deepseek-chat",
-            messages=[{"role": "system", "content": prompt_filled}]
-        )
-        return response.choices[0].message.content
-    except Exception as e:
-        print(f"处理批次 (起始序号 {start_index}) 时调用API失败: {e}")
-        return f"--- \n\n#### 处理邮件 {start_index} 到 {start_index + len(email_batch) - 1} 时出错\n- **错误详情**: `{e}`\n\n---"
+    for attempt in range(max_retries + 1):
+        try:
+            response = client.chat.completions.create(
+                model=LLM_MODEL,
+                temperature=LLM_TEMPERATURE,
+                max_tokens=LLM_MAX_TOKENS,
+                messages=[{"role": "system", "content": prompt_filled}]
+            )
+            return {
+                "success": True,
+                "content": response.choices[0].message.content,
+                "error": None,
+            }
+        except Exception as e:
+            should_retry = attempt < max_retries and _is_retryable_exception(e)
+            if should_retry:
+                retry_delay = base_delay * (2 ** attempt)
+                print(
+                    f"处理批次 (起始序号 {start_index}) 第 {attempt + 1} 次调用失败，将在 {retry_delay}s 后重试: {e}"
+                )
+                time.sleep(retry_delay)
+                continue
+
+            print(f"处理批次 (起始序号 {start_index}) 最终失败: {e}")
+            return {
+                "success": False,
+                "content": _build_batch_error_block(start_index, len(email_batch), e),
+                "error": {
+                    "exception_type": type(e).__name__,
+                    "message": str(e),
+                },
+            }
 
 
-def summarize_with_llm(email_list, batch_size=25):
+def summarize_with_llm(email_list, batch_size=25, max_retries=3, base_delay=2):
     """
     协调分批处理邮件列表的总结任务。
     """
@@ -246,7 +318,8 @@ def summarize_with_llm(email_list, batch_size=25):
     )
     
     total_emails = len(email_list)
-    report_parts = [f"### 每日邮件汇总\n**总览：共 {total_emails} 封邮件**\n\n---"]
+    report_parts = []
+    failed_batches = 0
     
     print(f"开始分批总结 {total_emails} 封邮件，每批最多 {batch_size} 封...")
     
@@ -255,10 +328,24 @@ def summarize_with_llm(email_list, batch_size=25):
         start_index = i + 1
         print(f"  正在处理第 {i//batch_size + 1} 批 (邮件 {start_index} 到 {min(i+batch_size, total_emails)})...")
         
-        batch_summary = summarize_single_batch(client, batch, start_index)
-        report_parts.append(batch_summary)
+        batch_result = summarize_single_batch(
+            client,
+            batch,
+            start_index,
+            max_retries=max_retries,
+            base_delay=base_delay,
+        )
+        if not batch_result["success"]:
+            failed_batches += 1
+        report_parts.append(batch_result["content"])
 
-    return "\n".join(report_parts)
+    overview = (
+        f"### 每日邮件汇总\n"
+        f"**总览：共 {total_emails} 封邮件，处理失败批次 {failed_batches} 个**\n\n"
+        "---"
+    )
+
+    return "\n".join([overview] + report_parts)
 
 
 def send_email_notification(summary_md, date_for_subject):
