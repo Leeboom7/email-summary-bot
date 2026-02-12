@@ -6,6 +6,7 @@
 import os
 import imaplib
 import email
+import re
 from email.header import decode_header
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
@@ -74,6 +75,77 @@ SMTP_PORT = int(os.environ.get("SMTP_PORT", 587))
 # 核心功能函数
 # ==============================================================================
 
+def _decode_part_payload(part):
+    """
+    解码单个邮件 part 的 payload。
+    优先使用 part 自身声明的 charset，失败后回退到 utf-8、gb18030。
+    """
+    payload = part.get_payload(decode=True)
+    if payload is None:
+        return ""
+
+    charsets = [part.get_content_charset(), "utf-8", "gb18030"]
+    for charset in charsets:
+        if not charset:
+            continue
+        try:
+            return payload.decode(charset)
+        except (LookupError, UnicodeDecodeError):
+            continue
+
+    return payload.decode("utf-8", errors="ignore")
+
+
+def _strip_html_tags(html_text):
+    """
+    轻量去除 HTML 标签并清理空白。
+    """
+    if not html_text:
+        return ""
+    text = re.sub(r"(?is)<(script|style).*?>.*?</\1>", " ", html_text)
+    text = re.sub(r"(?s)<[^>]+>", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_body_preview(msg, max_len=1500):
+    """
+    提取邮件正文预览：
+    1) multipart 时跳过附件；2) 优先 text/plain，回退 text/html；
+    3) 解码按 charset -> utf-8 -> gb18030；4) payload None 防护；
+    5) 最终统一截断并清理空白。
+    """
+    plain_candidates = []
+    html_candidates = []
+
+    parts = msg.walk() if msg.is_multipart() else [msg]
+    for part in parts:
+        content_disposition = (part.get("Content-Disposition") or "").lower()
+        if "attachment" in content_disposition:
+            continue
+
+        content_type = part.get_content_type()
+        if content_type not in ("text/plain", "text/html"):
+            continue
+
+        decoded_text = _decode_part_payload(part)
+        if not decoded_text:
+            continue
+
+        if content_type == "text/plain":
+            plain_candidates.append(decoded_text)
+        elif content_type == "text/html":
+            html_candidates.append(decoded_text)
+
+    if plain_candidates:
+        body = "\n".join(plain_candidates)
+    elif html_candidates:
+        body = _strip_html_tags("\n".join(html_candidates))
+    else:
+        body = ""
+
+    body = re.sub(r"\s+", " ", body).strip()
+    return body[:max_len]
+
 def get_emails_from_target_date(target_date):
     """
     通过IMAP连接到邮箱，获取指定日期的邮件。
@@ -126,28 +198,9 @@ def get_emails_from_target_date(target_date):
                 if isinstance(from_, bytes):
                     from_ = from_.decode(encoding if encoding else "utf-8", errors='ignore')
 
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        if part.get_content_type() == "text/plain":
-                            try:
-                                body_bytes = part.get_payload(decode=True)
-                                try: body = body_bytes.decode('utf-8')
-                                except UnicodeDecodeError:
-                                    try: body = body_bytes.decode('gbk')
-                                    except UnicodeDecodeError: body = body_bytes.decode('utf-8', errors='ignore')
-                                break
-                            except: continue
-                else:
-                    try:
-                        body_bytes = msg.get_payload(decode=True)
-                        try: body = body_bytes.decode('utf-8')
-                        except UnicodeDecodeError:
-                            try: body = body_bytes.decode('gbk')
-                            except UnicodeDecodeError: body = body_bytes.decode('utf-8', errors='ignore')
-                    except: body = "无法解码正文。"
-                
-                mail_list.append({ "from_sender": from_, "subject": subject, "body_preview": body[:1500] })
+                body_preview = _extract_body_preview(msg)
+
+                mail_list.append({ "from_sender": from_, "subject": subject, "body_preview": body_preview })
             except Exception as e:
                 print(f"解析邮件 {email_id.decode()} 时出错: {e}")
                 continue
