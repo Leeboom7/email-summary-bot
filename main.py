@@ -7,7 +7,8 @@ import os
 import imaplib
 import email
 import re
-from email.header import decode_header
+from email.header import make_header, decode_header
+
 from email.utils import parsedate_to_datetime
 from datetime import datetime, timedelta, timezone
 import smtplib
@@ -190,13 +191,13 @@ def get_emails_from_target_date(target_date):
                 if email_dt_in_beijing.date() != target_date.date():
                     continue
 
-                subject, encoding = decode_header(msg["Subject"])[0]
-                if isinstance(subject, bytes):
-                    subject = subject.decode(encoding if encoding else "utf-8", errors='ignore')
+                subject = str(make_header(decode_header(msg.get("Subject", ""))))
+                if not subject.strip():
+                    subject = "(无主题)"
 
-                from_, encoding = decode_header(msg.get("From"))[0]
-                if isinstance(from_, bytes):
-                    from_ = from_.decode(encoding if encoding else "utf-8", errors='ignore')
+                from_ = str(make_header(decode_header(msg.get("From", ""))))
+                if not from_.strip():
+                    from_ = "(未知发件人)"
 
                 body_preview = _extract_body_preview(msg)
 
